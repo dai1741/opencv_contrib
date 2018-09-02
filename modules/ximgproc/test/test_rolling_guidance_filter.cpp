@@ -12,8 +12,8 @@ static std::string getOpenCVExtraDir()
 
 static void checkSimilarity(InputArray src, InputArray ref)
 {
-    // Doesn't work with bilateral filter: EXPECT_LE(cvtest::norm(src, ref, NORM_INF), 1.0);
-    EXPECT_LE(cvtest::norm(src, ref, NORM_L2 | NORM_RELATIVE), 1e-3);
+    // Large tolerance value is used because of low accuracy of GaussianBlur() for uchar type
+    EXPECT_LE(cvtest::norm(src, ref, NORM_L2 | NORM_RELATIVE), 0.02);
 }
 
 static Mat convertTypeAndSize(Mat src, int dstType, Size dstSize)
@@ -136,6 +136,81 @@ INSTANTIATE_TEST_CASE_P(TypicalSet1, RollingGuidanceFilterTest,
 //////////////////////////////////////////////////////////////////////////
 //////////////////////////////////////////////////////////////////////////
 
+void gaussianFilterNaive(InputArray src, OutputArray dst, double sigma, int borderType = BORDER_DEFAULT);
+
+typedef Vec<float, 1> Vec1f;
+typedef Vec<uchar, 1> Vec1b;
+
+template<typename SrcVec>
+void gaussianFilterNaive_(InputArray src_, OutputArray dst_, double sigma, int borderType)
+{
+    CV_Assert(src_.type() == traits::Type<SrcVec>::value);
+    typedef Vec<float, SrcVec::channels> SrcVecf;
+
+    if (sigma <= 0)
+        sigma = 1;
+
+    int d = cvRound(sigma*(src_.depth() == CV_8U ? 3 : 4) * 2 + 1) | 1;
+    int radius = d / 2;
+    radius = std::max(radius, 1);
+    d = 2 * radius + 1;
+
+    dst_.create(src_.size(), src_.type());
+    Mat_<SrcVec> dst = dst_.getMat();
+    Mat_<SrcVec> srcExt;
+    cv::copyMakeBorder(src_, srcExt, radius, radius, radius, radius, borderType);
+
+    float coef = (float)(-0.5 / (sigma*sigma));
+
+    for (int i = radius; i < srcExt.rows - radius; i++)
+    {
+        for (int j = radius; j < srcExt.cols - radius; j++)
+        {
+            SrcVecf sum = SrcVecf::all(0.0f);
+            float sumWeights = 0.0f;
+
+            for (int k = -radius; k <= radius; k++)
+            {
+                for (int l = -radius; l <= radius; l++)
+                {
+                    float distSqr = (float)(k*k + l*l);
+
+                    float weight = std::exp(distSqr*coef);
+
+                    sum += weight*SrcVecf(srcExt(i + k, j + l));
+                    sumWeights += weight;
+                }
+            }
+
+            dst(i - radius, j - radius) = sum / sumWeights;
+        }
+    }
+}
+
+void gaussianFilterNaive(InputArray src, OutputArray dst, double sigma, int borderType)
+{
+    CV_Assert(src.type() == CV_32FC1 || src.type() == CV_32FC3 || src.type() == CV_8UC1 || src.type() == CV_8UC3);
+
+    int srcType = src.type();
+
+    if (srcType == CV_8UC1)
+    {
+        gaussianFilterNaive_<Vec1b>(src, dst, sigma, borderType);
+    }
+    if (srcType == CV_8UC3)
+    {
+        gaussianFilterNaive_<Vec3b>(src, dst, sigma, borderType);
+    }
+    if (srcType == CV_32FC1)
+    {
+        gaussianFilterNaive_<Vec1f>(src, dst, sigma, borderType);
+    }
+    if (srcType == CV_32FC3)
+    {
+        gaussianFilterNaive_<Vec3f>(src, dst, sigma, borderType);
+    }
+}
+
 typedef tuple<double, string, int> RGFBFParam;
 typedef TestWithParam<RGFBFParam> RollingGuidanceFilterTest_GaussianRef;
 
@@ -154,7 +229,7 @@ TEST_P(RollingGuidanceFilterTest_GaussianRef, Accuracy)
     double sigmaC = rnd.uniform(0.0, 255.0);
 
     Mat resRef;
-    GaussianBlur(src, resRef, Size(0, 0), sigmaS);
+    gaussianFilterNaive(src, resRef, sigmaS);
 
     Mat res;
     rollingGuidanceFilter(src, res, 0, sigmaC, sigmaS, 1);
@@ -164,7 +239,7 @@ TEST_P(RollingGuidanceFilterTest_GaussianRef, Accuracy)
 
 INSTANTIATE_TEST_CASE_P(TypicalSet2, RollingGuidanceFilterTest_GaussianRef,
     Combine(
-    Values(4.0, 6.0, 8.0),
+    Values(4.0, 6.0),
     Values("/cv/shared/pic2.png", "/cv/shared/lena.png", "cv/shared/box_in_scene.png"),
     Values(CV_8UC1, CV_8UC3, CV_32FC1, CV_32FC3)
     )
